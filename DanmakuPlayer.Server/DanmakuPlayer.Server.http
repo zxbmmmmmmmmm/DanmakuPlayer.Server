@@ -1,0 +1,6 @@
+@DanmakuPlayer.Server_HostAddress = http://localhost:5105
+
+GET {{DanmakuPlayer.Server_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
