@@ -1,31 +1,53 @@
-﻿using Microsoft.AspNetCore.Connections;
+﻿using DanmakuPlayer.Server.Models;
+using Microsoft.AspNetCore.Connections;
 using Microsoft.AspNetCore.Mvc;
+using System.Buffers;
 using System.Collections.Generic;
+using System.Net.Sockets;
 using System.Net.WebSockets;
 using System.Text;
+using System.Text.Json;
 
 namespace DanmakuPlayer.Server.Controllers;
 
 public class SyncController(ILogger<SyncController> logger) : ControllerBase
 {
     private static readonly List<WebSocket> Sockets = [];
-    private static string? _currentStatus;
+    private static readonly CurrentStatus CurrentStatus = new();
     private static readonly Lock Lock = new Lock();
-    private ILogger _logger = logger;
+    private readonly ILogger _logger = logger;
+    private const int ReceiveBufferSize = 4096;
 
     [HttpGet]
     [Route("sync")]
-    public async Task Sync()
+    [HttpGet("{userName}")]
+    public async Task Sync(string userName)
     {
         if (HttpContext.WebSockets.IsWebSocketRequest)
         {
+            var loginInfo = new LoginInfo(
+                UserName: userName,
+                ClientIp: HttpContext.Connection.RemoteIpAddress?.ToString() ?? "Unknown",
+                LoginTime: DateTimeOffset.Now
+            );
+
             using var webSocket = await HttpContext.WebSockets.AcceptWebSocketAsync();
+            WebSocket? socketToSendMessage = null;
             lock (Lock)
             {
+                if(Sockets.Count != 0)
+                {
+                    socketToSendMessage = Sockets.FirstOrDefault(s => s.State == WebSocketState.Open);
+                }
                 Sockets.Add(webSocket);
+                CurrentStatus.TotalConnectedClients++;
             }
             _logger.LogInformation("Websocket connected from {RemoteIp}", HttpContext.Connection.RemoteIpAddress?.ToString());
-
+            await BroadcastMessageAsync(new Message(MessageTypes.Login, JsonSerializer.Serialize(loginInfo)), webSocket);
+            if(socketToSendMessage is not null)
+            {
+                await SendMessageAsync(new Message(MessageTypes.SendCurrentStatus), socketToSendMessage);
+            }
             await HandleWebSocketConnection(webSocket);
         }
         else
@@ -36,10 +58,10 @@ public class SyncController(ILogger<SyncController> logger) : ControllerBase
 
     [HttpGet]
     [Route("current")]
-    public string? Get()
+    public CurrentStatus? Get()
     {
         _logger.LogInformation("Get current status from {RemoteIp}", HttpContext.Connection.RemoteIpAddress?.ToString());
-        return _currentStatus;
+        return CurrentStatus;
     }
    
 
@@ -49,7 +71,7 @@ public class SyncController(ILogger<SyncController> logger) : ControllerBase
 
     private async Task HandleWebSocketConnection(WebSocket webSocket)
     {
-        var buffer = new byte[1024 * 4];
+        var buffer = ArrayPool<byte>.Shared.Rent(ReceiveBufferSize);
         try
         {
             while (webSocket.State == WebSocketState.Open)
@@ -63,13 +85,14 @@ public class SyncController(ILogger<SyncController> logger) : ControllerBase
                 }
 
                 // 处理接收到的消息
-                var message = Encoding.UTF8.GetString(buffer, 0, result.Count);
+                var messageReceived = Encoding.UTF8.GetString(buffer, 0, result.Count);
 
-                _currentStatus = message;
-                _logger.LogInformation("Message received from {RemoteIp}, Message:{Message}", 
-                    HttpContext.Connection.RemoteIpAddress?.ToString(), message);
+                CurrentStatus.LastStatusReceived = messageReceived;
+                _logger.LogInformation("Message received from {RemoteIp}, Message:{Message}",
+                    HttpContext.Connection.RemoteIpAddress?.ToString(), messageReceived);
 
-                await BroadcastMessageAsync(message, webSocket);
+                await BroadcastMessageAsync(new Message(MessageTypes.StatusUpdate, messageReceived), webSocket);
+
             }
         }
         catch (WebSocketException ex) when (ex.WebSocketErrorCode == WebSocketError.ConnectionClosedPrematurely)
@@ -81,20 +104,17 @@ public class SyncController(ILogger<SyncController> logger) : ControllerBase
             lock (Lock)
             {
                 Sockets.Remove(webSocket);
-                if (Sockets.Count == 0)
-                {
-                    _currentStatus = null;
-                }
+                CurrentStatus.TotalConnectedClients--;
             }
             webSocket.Dispose();
             _logger.LogInformation("Disconnected from {RemoteIp}", HttpContext.Connection.RemoteIpAddress?.ToString());
-
+            ArrayPool<byte>.Shared.Return(buffer);
         }
     }
 
-    private async Task BroadcastMessageAsync(string message,WebSocket currentWebSocket)
+    private async Task BroadcastMessageAsync(Message message, WebSocket currentWebSocket)
     {
-        var buffer = Encoding.UTF8.GetBytes(message);
+        var buffer = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(message));
         var segment = new ArraySegment<byte>(buffer);
         List<WebSocket> activeSockets;
         // 获取所有活跃连接的安全副本
@@ -139,14 +159,18 @@ public class SyncController(ILogger<SyncController> logger) : ControllerBase
         await Task.WhenAll(sendTasks);
     }
 
-}
 
-public struct RemoteStatus()
-{
-    public bool IsPlaying { get; set; }
-    public DateTime CurrentTime { get; set; }
-    public TimeSpan VideoTime { get; set; }
-    public TimeSpan DanmakuDelayTime { get; set; }
-    public double PlaybackRate { get; set; }
-    public Dictionary<string, object> ChangedValues { get; } = [];
+    private async Task SendMessageAsync(Message message, WebSocket targetWebSocket)
+    {
+        var buffer = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(message));
+        var segment = new ArraySegment<byte>(buffer);
+
+        if (targetWebSocket.State == WebSocketState.Open)
+        {
+            await targetWebSocket.SendAsync(segment,
+                WebSocketMessageType.Text,
+                true,
+                CancellationToken.None);
+        }
+    }
 }
