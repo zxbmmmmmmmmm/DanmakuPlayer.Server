@@ -25,11 +25,7 @@ public class SyncController(ILogger<SyncController> logger) : ControllerBase
     {
         if (HttpContext.WebSockets.IsWebSocketRequest)
         {
-            var loginInfo = new LoginInfo(
-                UserName: userName,
-                ClientIp: HttpContext.Connection.RemoteIpAddress?.ToString() ?? "Unknown",
-                LoginTime: DateTimeOffset.Now
-            );
+
 
             using var webSocket = await HttpContext.WebSockets.AcceptWebSocketAsync();
             WebSocket? socketToSendMessage = null;
@@ -43,7 +39,14 @@ public class SyncController(ILogger<SyncController> logger) : ControllerBase
                 CurrentStatus.TotalConnectedClients++;
             }
             _logger.LogInformation("Websocket connected from {RemoteIp}", HttpContext.Connection.RemoteIpAddress?.ToString());
-            await BroadcastMessageAsync(new Message(MessageTypes.Login, JsonSerializer.Serialize(loginInfo)), webSocket);
+
+            var loginInfo = new LoginInfo(
+                UserName: userName,
+                ClientIp: HttpContext.Connection.RemoteIpAddress?.ToString() ?? "Unknown",
+                Time: DateTimeOffset.Now,
+                Current: CurrentStatus
+            );
+            await BroadcastMessageAsync(new Message(MessageTypes.Login, JsonSerializer.Serialize(loginInfo)));
             if(socketToSendMessage is not null)
             {
                 await SendMessageAsync(new Message(MessageTypes.SendCurrentStatus), socketToSendMessage);
@@ -100,19 +103,26 @@ public class SyncController(ILogger<SyncController> logger) : ControllerBase
             // 客户端意外断开
         }
         finally
-        {
+        {          
             lock (Lock)
             {
                 Sockets.Remove(webSocket);
                 CurrentStatus.TotalConnectedClients--;
             }
             webSocket.Dispose();
+            var info = new LoginInfo(
+                null,
+                ClientIp: HttpContext.Connection.RemoteIpAddress?.ToString() ?? "Unknown",
+                Time: DateTimeOffset.Now,
+                Current: CurrentStatus
+            );
+            await BroadcastMessageAsync(new Message(MessageTypes.StatusUpdate, JsonSerializer.Serialize(info)));
             _logger.LogInformation("Disconnected from {RemoteIp}", HttpContext.Connection.RemoteIpAddress?.ToString());
             ArrayPool<byte>.Shared.Return(buffer);
         }
     }
 
-    private async Task BroadcastMessageAsync(Message message, WebSocket currentWebSocket)
+    private async Task BroadcastMessageAsync(Message message, WebSocket? currentWebSocket = null)
     {
         var buffer = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(message));
         var segment = new ArraySegment<byte>(buffer);

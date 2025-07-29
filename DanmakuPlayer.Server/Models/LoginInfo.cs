@@ -2,7 +2,8 @@
 
 public record LoginInfo
 (
-    string UserName,
+    string? UserName,
     string ClientIp,
-    DateTimeOffset LoginTime
+    DateTimeOffset Time,
+    CurrentStatus Current
 );
