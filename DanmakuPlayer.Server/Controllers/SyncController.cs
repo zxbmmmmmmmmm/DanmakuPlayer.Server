@@ -42,7 +42,6 @@ public class SyncController(ILogger<SyncController> logger) : ControllerBase
 
             var loginInfo = new LoginInfo(
                 UserName: userName,
-                ClientIp: HttpContext.Connection.RemoteIpAddress?.ToString() ?? "Unknown",
                 Time: DateTimeOffset.Now,
                 Current: CurrentStatus
             );
@@ -112,7 +111,6 @@ public class SyncController(ILogger<SyncController> logger) : ControllerBase
             webSocket.Dispose();
             var info = new LoginInfo(
                 null,
-                ClientIp: HttpContext.Connection.RemoteIpAddress?.ToString() ?? "Unknown",
                 Time: DateTimeOffset.Now,
                 Current: CurrentStatus
             );
